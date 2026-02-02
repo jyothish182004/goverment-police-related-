@@ -2,6 +2,7 @@
   "name": "Sentinel AI - Public Safety Dashboard",
   "description": "An AI-powered public safety monitoring system for automated accident detection and incident management using CCTV footage analysis.",
   "requestFramePermissions": [
-    "camera"
+    "camera",
+    "geolocation"
   ]
 }
