@@ -8,6 +8,7 @@ export class BackendService {
   private db: IDBDatabase | null = null;
 
   async init(): Promise<void> {
+    if (this.db) return;
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
 
@@ -32,7 +33,7 @@ export class BackendService {
 
   // INCIDENT STORAGE
   async saveIncident(incident: Incident): Promise<void> {
-    if (!this.db) await this.init();
+    await this.init();
     return new Promise((resolve, reject) => {
       const transaction = this.db!.transaction(['incidents'], 'readwrite');
       const store = transaction.objectStore('incidents');
@@ -43,7 +44,7 @@ export class BackendService {
   }
 
   async getAllIncidents(): Promise<Incident[]> {
-    if (!this.db) await this.init();
+    await this.init();
     return new Promise((resolve) => {
       const transaction = this.db!.transaction(['incidents'], 'readonly');
       const store = transaction.objectStore('incidents');
@@ -52,13 +53,26 @@ export class BackendService {
     });
   }
 
+  async deleteIncident(id: string): Promise<void> {
+    await this.init();
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['incidents'], 'readwrite');
+      const store = transaction.objectStore('incidents');
+      store.delete(id);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject('Failed to delete incident');
+    });
+  }
+
   // REGISTRY STORAGE & DUPLICATE CHECK
   async saveTarget(subject: IdentifiedSubject): Promise<void> {
-    if (!this.db) await this.init();
+    await this.init();
     
-    // Check for duplicates based on a simple hash of the image data
+    // Check for duplicates based on image data or ID
     const existing = await this.getAllTargets();
-    const isDuplicate = existing.some(t => t.mugshotBase64 === subject.mugshotBase64);
+    const isDuplicate = existing.some(t => 
+      t.mugshotBase64 === subject.mugshotBase64 || t.id === subject.id
+    );
     
     if (isDuplicate) {
       throw new Error('DUPLICATE_FOUND');
@@ -74,7 +88,7 @@ export class BackendService {
   }
 
   async getAllTargets(): Promise<IdentifiedSubject[]> {
-    if (!this.db) await this.init();
+    await this.init();
     return new Promise((resolve) => {
       const transaction = this.db!.transaction(['registry'], 'readonly');
       const store = transaction.objectStore('registry');
@@ -83,10 +97,15 @@ export class BackendService {
     });
   }
 
-  async deleteIncident(id: string): Promise<void> {
-    if (!this.db) await this.init();
-    const transaction = this.db!.transaction(['incidents'], 'readwrite');
-    transaction.objectStore('incidents').delete(id);
+  async deleteTarget(id: string): Promise<void> {
+    await this.init();
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['registry'], 'readwrite');
+      const store = transaction.objectStore('registry');
+      store.delete(id);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject('Failed to delete target');
+    });
   }
 }
 
