@@ -1,9 +1,18 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Incident, IncidentType, TransportMode, VerificationAudit } from '../types';
-import { verifyReportImage } from '../services/geminiService';
+import { verifyReportImage, findNearbyHospitals } from '../services/geminiService';
 
 declare const L: any;
+
+interface HospitalData {
+  id: string;
+  name: string;
+  location: { lat: number, lng: number };
+  address?: string;
+  uri?: string;
+  image?: string;
+}
 
 interface TacticalMapProps {
   incidents: Incident[];
@@ -19,32 +28,50 @@ const TacticalMap: React.FC<TacticalMapProps> = ({ incidents, onManualReport, on
   const [userLocation, setUserLocation] = useState<{lat: number, lng: number} | null>(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [showSOSModal, setShowSOSModal] = useState(false);
-  const [routingTo, setRoutingTo] = useState<{name: string, lat: number, lng: number} | null>(null);
+  const [discoveredHospitals, setDiscoveredHospitals] = useState<HospitalData[]>([]);
+  const [selectedHospital, setSelectedHospital] = useState<HospitalData | null>(null);
+  const [isScanning, setIsScanning] = useState(false);
   const [transportMode, setTransportMode] = useState<TransportMode | null>(null);
   
-  // Verification States
-  const [pendingType, setPendingType] = useState<IncidentType | null>(null);
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verificationError, setVerificationError] = useState<string | null>(null);
-  const [auditResult, setAuditResult] = useState<VerificationAudit | null>(null);
+  // Navigation & Mission State
+  const [navigationMode, setNavigationMode] = useState(false);
+  const [routeDistance, setRouteDistance] = useState<string>('0.0 KM');
+  const [nextTurn, setNextTurn] = useState<string>('Follow emergency corridor');
+  const [eta, setEta] = useState<string>('CALC...');
 
   const userMarkerRef = useRef<any>(null);
+  const hospitalMarkersRef = useRef<Map<string, any>>(new Map());
   const incidentMarkersRef = useRef<Map<string, any>>(new Map());
   const routeLineRef = useRef<any>(null);
+
+  // Road-wise routing using OSRM API
+  const fetchRoadRoute = async (start: {lat: number, lng: number}, end: {lat: number, lng: number}) => {
+    try {
+      const resp = await fetch(`https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`);
+      const data = await resp.json();
+      if (data.routes && data.routes.length > 0) {
+        const distKm = (data.routes[0].distance / 1000).toFixed(1);
+        const timeMin = Math.ceil(data.routes[0].duration / 60);
+        setRouteDistance(`${distKm} KM`);
+        setEta(`${timeMin} MINS`);
+        return data.routes[0].geometry.coordinates.map((coord: any) => [coord[1], coord[0]]);
+      }
+    } catch (e) {
+      console.error("Routing Error:", e);
+    }
+    return [[start.lat, start.lng], [end.lat, end.lng]];
+  };
 
   const syncLocation = () => {
     if (!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition((p) => {
       const { latitude, longitude } = p.coords;
       setUserLocation({ lat: latitude, lng: longitude });
-      if (mapRef.current) {
+      if (mapRef.current && !navigationMode) {
         mapRef.current.setView([latitude, longitude], 15);
         updateUserMarker(latitude, longitude);
       }
-    }, () => {
-      // Fallback location
-      setUserLocation({ lat: 12.9716, lng: 77.5946 });
-    });
+    }, () => setUserLocation({ lat: 12.9716, lng: 77.5946 }));
   };
 
   const updateUserMarker = (lat: number, lng: number) => {
@@ -52,104 +79,86 @@ const TacticalMap: React.FC<TacticalMapProps> = ({ incidents, onManualReport, on
     if (userMarkerRef.current) {
       userMarkerRef.current.setLatLng([lat, lng]);
     } else {
-      const icon = L.divIcon({
-        className: 'user-marker',
-        html: `<div class="relative flex items-center justify-center">
-                <div class="absolute w-12 h-12 bg-blue-500/30 rounded-full animate-ping"></div>
-                <div class="w-8 h-8 bg-blue-600 rounded-full border-2 border-white shadow-xl flex items-center justify-center">
-                  <i class="fa-solid fa-crosshairs text-white text-[10px]"></i>
-                </div>
-              </div>`,
-        iconSize: [40, 40],
-        iconAnchor: [20, 20]
-      });
-      userMarkerRef.current = L.marker([lat, lng], { icon }).addTo(mapRef.current);
+      userMarkerRef.current = L.marker([lat, lng], {
+        icon: L.divIcon({
+          className: 'user-marker',
+          html: `<div class="relative flex items-center justify-center">
+                  <div class="absolute w-12 h-12 bg-blue-500/30 rounded-full animate-ping"></div>
+                  <div class="w-8 h-8 bg-blue-600 rounded-full border-2 border-white shadow-xl flex items-center justify-center text-white">
+                    <i class="fa-solid fa-location-arrow transform -rotate-45 text-[10px]"></i>
+                  </div>
+                </div>`,
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        })
+      }).addTo(mapRef.current);
     }
   };
 
-  const handleManualTypeSelect = (type: IncidentType) => {
-    setPendingType(type);
-    setVerificationError(null);
-    setAuditResult(null);
-    reportFileInputRef.current?.click();
-  };
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !pendingType || !userLocation) return;
-
-    setIsVerifying(true);
-    setVerificationError(null);
-
-    try {
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const base64 = (reader.result as string).split(',')[1];
-        const mediaUrl = URL.createObjectURL(file);
-
-        // Perform AI Verification for AI-generated detection
-        const result = await verifyReportImage(base64, file.type, !process.env.API_KEY, pendingType, userLocation);
-        
-        setAuditResult(result.audit);
-
-        if (result.isReal) {
-          const newInc: Incident = {
-            id: `MAN-${Math.floor(Math.random() * 9999)}`,
-            type: pendingType,
-            timestamp: 'LIVE',
-            savedAt: new Date().toLocaleString(),
-            location: 'FIELD VERIFIED SECTOR',
-            locationCoords: { ...userLocation },
-            confidence: result.audit.overallScore / 100,
-            videoRef: 'Field Evidence',
-            snapshotUrl: mediaUrl,
-            description: `MANUAL REPORT: ${pendingType}. Biometrically and neurally verified as real-world imagery.`,
-            detectedObjects: ['Visual Evidence']
-          };
-          
-          onManualReport(newInc);
-          setTimeout(() => {
-            setShowReportModal(false);
-            setIsVerifying(false);
-            setPendingType(null);
-            setAuditResult(null);
-          }, 2000);
-        } else {
-          setVerificationError(result.reason);
-          setIsVerifying(false);
-        }
-      };
-      reader.readAsDataURL(file);
-    } catch (err) {
-      setVerificationError("Neural uplink failed. Please retry.");
-      setIsVerifying(false);
-    }
-  };
-
-  const handleSOS = (mode: TransportMode) => {
+  const handleSOSScan = async (mode: TransportMode) => {
     if (!userLocation) return;
     setTransportMode(mode);
-    const hosp = {
-      name: "CENTRAL MEDICAL HUB",
-      lat: userLocation.lat + 0.008,
-      lng: userLocation.lng + 0.005,
-      eta: "4 Mins"
-    };
-    setRoutingTo(hosp);
+    setIsScanning(true);
     setShowSOSModal(false);
+    setSelectedHospital(null);
     
-    if (routeLineRef.current) routeLineRef.current.remove();
-    routeLineRef.current = L.polyline([[userLocation.lat, userLocation.lng], [hosp.lat, hosp.lng]], { color: '#10b981', weight: 6, opacity: 0.8, dashArray: '10, 10' }).addTo(mapRef.current);
-    mapRef.current.fitBounds(routeLineRef.current.getBounds(), { padding: [50, 50] });
+    // Scan hospitals within 10km radius
+    const hospitals = await findNearbyHospitals(userLocation.lat, userLocation.lng);
+    setDiscoveredHospitals(hospitals);
+    setIsScanning(false);
 
-    L.marker([hosp.lat, hosp.lng], {
-      icon: L.divIcon({
-        className: 'hosp-marker',
-        html: `<div class="w-10 h-10 bg-emerald-500 rounded-xl border-2 border-white shadow-xl flex items-center justify-center">
-                 <i class="fa-solid fa-hospital text-white text-sm"></i>
-               </div>`
-      })
-    }).addTo(mapRef.current).bindPopup(`<b class='text-black'>${hosp.name}</b><br/>ETA: ${hosp.eta}`).openPopup();
+    // Clear old hospital markers
+    hospitalMarkersRef.current.forEach(m => m.remove());
+    hospitalMarkersRef.current.clear();
+
+    // Place facility markers
+    hospitals.forEach(h => {
+      const marker = L.marker([h.location.lat, h.location.lng], {
+        icon: L.divIcon({
+          className: 'hosp-marker',
+          html: `<div class="w-10 h-10 bg-emerald-500 rounded-xl border-2 border-white shadow-lg flex items-center justify-center text-white transition-all transform hover:scale-125">
+                   <i class="fa-solid fa-hospital"></i>
+                 </div>`,
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        })
+      }).on('click', () => handleHospitalSelect(h)).addTo(mapRef.current);
+      hospitalMarkersRef.current.set(h.id, marker);
+    });
+
+    if (hospitals.length > 0) {
+      const bounds = L.latLngBounds(hospitals.map(h => [h.location.lat, h.location.lng]));
+      bounds.extend([userLocation.lat, userLocation.lng]);
+      mapRef.current.fitBounds(bounds, { padding: [100, 100], duration: 1.5 });
+    }
+  };
+
+  const handleHospitalSelect = async (h: HospitalData) => {
+    setSelectedHospital(h);
+    if (!userLocation) return;
+    
+    // Cleanup previous route
+    if (routeLineRef.current) routeLineRef.current.remove();
+    
+    // Get actual road path
+    const roadPoints = await fetchRoadRoute(userLocation, { lat: h.location.lat, lng: h.location.lng });
+    
+    routeLineRef.current = L.polyline(roadPoints, { 
+      color: '#10b981', 
+      weight: 10, 
+      opacity: 0.9,
+      lineJoin: 'round',
+      dashArray: '1, 15', // Visual pulse effect
+    }).addTo(mapRef.current);
+
+    mapRef.current.setView([h.location.lat, h.location.lng], 16, { animate: true });
+  };
+
+  const startMission = () => {
+    if (!selectedHospital || !userLocation) return;
+    setNavigationMode(true);
+    mapRef.current.setView([userLocation.lat, userLocation.lng], 19, { animate: true });
+    setNextTurn("Proceed to emergency corridor // Exit Sector");
   };
 
   useEffect(() => {
@@ -158,58 +167,20 @@ const TacticalMap: React.FC<TacticalMapProps> = ({ incidents, onManualReport, on
     mapRef.current = map;
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png').addTo(map);
     syncLocation();
-
-    // Global listener for "Remove" button in popup
-    const handlePopupClick = (e: any) => {
-      if (e.target.id && e.target.id.startsWith('remove-btn-')) {
-        const id = e.target.id.replace('remove-btn-', '');
-        onDeleteIncident(id);
-      }
-    };
-    document.addEventListener('click', handlePopupClick);
-    return () => document.removeEventListener('click', handlePopupClick);
   }, []);
 
   useEffect(() => {
     if (!mapRef.current) return;
-    
-    // Clean up markers that are no longer in the list
-    const currentIds = new Set(incidents.map(i => i.id));
-    incidentMarkersRef.current.forEach((marker, id) => {
-      if (!currentIds.has(id)) {
-        marker.remove();
-        incidentMarkersRef.current.delete(id);
-      }
-    });
-
     incidents.forEach((inc) => {
       if (incidentMarkersRef.current.has(inc.id)) return;
-
-      const lat = inc.locationCoords?.lat || 12.9716;
-      const lng = inc.locationCoords?.lng || 77.5946;
-      
-      const color = inc.type.includes('Collision') || inc.type.includes('Weapon') ? 'bg-red-600' : 'bg-amber-500';
-      const icon = inc.type.includes('Collision') ? 'fa-car-burst' : 'fa-triangle-exclamation';
-
-      const marker = L.marker([lat, lng], {
+      const marker = L.marker([inc.locationCoords?.lat || 12.9716, inc.locationCoords?.lng || 77.5946], {
         icon: L.divIcon({
           className: 'incident-marker',
-          html: `<div class="w-10 h-10 ${color} rounded-xl border-2 border-white shadow-lg flex items-center justify-center animate-pulse">
-                   <i class="fa-solid ${icon} text-white text-xs"></i>
+          html: `<div class="w-10 h-10 ${inc.type.includes('Collision') ? 'bg-red-600' : 'bg-amber-500'} rounded-xl border-2 border-white shadow-lg flex items-center justify-center animate-pulse">
+                   <i class="fa-solid ${inc.type.includes('Collision') ? 'fa-car-burst' : 'fa-triangle-exclamation'} text-white text-xs"></i>
                  </div>`
         })
       }).addTo(mapRef.current);
-
-      marker.bindPopup(`
-        <div class="p-3 bg-slate-950 text-white rounded-xl border border-slate-800 flex flex-col items-center">
-          <p class="text-[9px] font-black text-blue-500 uppercase">${inc.type}</p>
-          <img src="${inc.snapshotUrl}" class="w-32 h-20 object-cover rounded-lg mt-2 border border-slate-800"/>
-          <button id="remove-btn-${inc.id}" class="mt-3 w-full py-2 bg-rose-600 hover:bg-rose-500 text-[9px] font-black uppercase tracking-widest text-white rounded-lg transition-all shadow-lg">
-            Remove Report
-          </button>
-        </div>
-      `, { className: 'custom-popup', minWidth: 150 });
-      
       incidentMarkersRef.current.set(inc.id, marker);
     });
   }, [incidents]);
@@ -218,121 +189,206 @@ const TacticalMap: React.FC<TacticalMapProps> = ({ incidents, onManualReport, on
     <div className="h-[calc(100vh-140px)] w-full relative overflow-hidden bg-black rounded-[4rem] border-4 border-slate-900 shadow-2xl">
       <div ref={mapContainerRef} className="h-full w-full z-10" />
 
-      {/* OVERLAYS */}
-      <div className="absolute top-10 left-10 z-[1000] flex flex-col gap-4 pointer-events-none">
-        <div className="bg-black/80 backdrop-blur-xl p-6 rounded-3xl border border-white/10 shadow-2xl pointer-events-auto">
-          <p className="text-[10px] font-black text-blue-500 uppercase tracking-widest mb-1">Sector Overwatch</p>
-          <h2 className="text-xl font-black text-white uppercase">{incidents.length} Active Threats</h2>
-        </div>
-        
-        {routingTo && (
-          <div className="bg-emerald-600 p-6 rounded-3xl text-white shadow-2xl animate-in slide-in-from-left pointer-events-auto">
-            <p className="text-[10px] font-black uppercase tracking-widest opacity-80 mb-1">Hospital Route Locked</p>
-            <h3 className="text-lg font-black">{routingTo.name}</h3>
-            <p className="text-2xl font-black mt-2">{routingTo.eta}</p>
-          </div>
-        )}
-      </div>
-
-      <div className="absolute bottom-10 right-10 z-[1000] flex flex-col gap-4">
-        <button onClick={() => setShowSOSModal(true)} className="w-20 h-20 bg-red-600 rounded-full flex flex-col items-center justify-center text-white shadow-xl hover:scale-110 transition-all border-4 border-white/20">
-          <i className="fa-solid fa-truck-medical text-2xl mb-1"></i>
-          <span className="text-[8px] font-black uppercase">SOS</span>
-        </button>
-        
-        <button onClick={() => { setShowReportModal(true); setVerificationError(null); setAuditResult(null); }} className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center text-white shadow-2xl hover:scale-110 transition-all">
-          <i className="fa-solid fa-plus text-2xl"></i>
-        </button>
-        
-        <button onClick={syncLocation} className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center text-slate-400 shadow-2xl hover:scale-110 transition-all border border-slate-800">
-          <i className="fa-solid fa-location-crosshairs text-2xl"></i>
-        </button>
-      </div>
-
-      <input type="file" ref={reportFileInputRef} className="hidden" accept="image/*" onChange={handleFileChange} />
-
-      {/* MODALS */}
-      {showReportModal && (
-        <div className="fixed inset-0 z-[2000] flex items-center justify-center p-6">
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={() => !isVerifying && setShowReportModal(false)}></div>
-          <div className="relative bg-slate-950 border-4 border-slate-900 p-10 rounded-[3rem] w-full max-w-lg space-y-8 shadow-2xl">
-            
-            {!isVerifying && !auditResult ? (
-              <>
-                <div className="text-center space-y-2">
-                  <h3 className="text-3xl font-black text-white uppercase tracking-tighter">Field Report</h3>
-                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Image verification required for AI-generated detection</p>
-                </div>
-                
-                {verificationError && (
-                  <div className="bg-rose-600/10 border border-rose-600/50 p-4 rounded-xl text-rose-500 text-[10px] font-black uppercase flex items-center gap-3">
-                    <i className="fa-solid fa-triangle-exclamation"></i>
-                    {verificationError}
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 gap-4">
-                  <button onClick={() => handleManualTypeSelect('Vehicle Collision')} className="p-6 bg-slate-900 border-2 border-slate-800 hover:border-blue-600 rounded-3xl flex justify-between items-center transition-all group">
-                    <span className="font-black uppercase tracking-widest text-white">Report Accident</span>
-                    <i className="fa-solid fa-camera text-slate-700 group-hover:text-blue-500 transition-colors"></i>
-                  </button>
-                  <button onClick={() => handleManualTypeSelect('Traffic Congestion')} className="p-6 bg-slate-900 border-2 border-slate-800 hover:border-amber-600 rounded-3xl flex justify-between items-center transition-all group">
-                    <span className="font-black uppercase tracking-widest text-white">Report Traffic</span>
-                    <i className="fa-solid fa-camera text-slate-700 group-hover:text-amber-500 transition-colors"></i>
-                  </button>
-                </div>
-              </>
-            ) : isVerifying ? (
-              <div className="py-12 text-center space-y-8">
-                <div className="relative w-24 h-24 mx-auto">
-                  <div className="absolute inset-0 border-4 border-slate-800 rounded-full"></div>
-                  <div className="absolute inset-0 border-4 border-t-blue-500 rounded-full animate-spin"></div>
-                  <i className="fa-solid fa-fingerprint absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-3xl text-blue-500 animate-pulse"></i>
-                </div>
-                <div className="space-y-2">
-                  <h4 className="text-xl font-black text-white uppercase tracking-widest">Neural Forensics Audit</h4>
-                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] animate-pulse">Scanning for synthetic textures...</p>
-                </div>
+      {/* NAVIGATION HUD */}
+      {navigationMode && selectedHospital && (
+        <div className="absolute top-0 inset-x-0 z-[2000] p-6 animate-in slide-in-from-top duration-500">
+           <div className="max-w-xl mx-auto bg-slate-950/90 backdrop-blur-3xl border-x-4 border-b-4 border-emerald-500 rounded-b-[3rem] p-8 shadow-[0_30px_70px_rgba(16,185,129,0.5)]">
+              <div className="flex justify-between items-start mb-6">
+                 <div className="flex items-center gap-6">
+                    <div className="w-16 h-16 bg-emerald-600 rounded-2xl flex items-center justify-center text-white text-3xl animate-pulse">
+                       <i className="fa-solid fa-location-arrow transform -rotate-45"></i>
+                    </div>
+                    <div>
+                       <p className="text-[10px] font-black text-emerald-500 uppercase tracking-[0.4em] mb-1">MISSION ACTIVE: {transportMode?.toUpperCase()}</p>
+                       <h3 className="text-2xl font-black text-white uppercase leading-tight">{nextTurn}</h3>
+                    </div>
+                 </div>
+                 <button onClick={() => setNavigationMode(false)} className="bg-slate-900 w-10 h-10 rounded-full text-slate-500 hover:text-white transition-colors flex items-center justify-center">
+                    <i className="fa-solid fa-xmark"></i>
+                 </button>
               </div>
-            ) : auditResult && (
-               <div className="py-12 text-center space-y-8 animate-in zoom-in">
-                  <div className="w-24 h-24 bg-emerald-500 rounded-full mx-auto flex items-center justify-center shadow-lg">
-                    <i className="fa-solid fa-check text-white text-4xl"></i>
-                  </div>
-                  <div className="space-y-2">
-                    <h4 className="text-2xl font-black text-white uppercase tracking-tighter">Neural Integrity Verified</h4>
-                    <p className="text-emerald-500 font-bold uppercase text-[10px] tracking-widest">Human Origin Confirmed // Report Archived</p>
-                  </div>
+              <div className="grid grid-cols-3 gap-6">
+                 <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+                    <p className="text-[8px] font-black text-slate-500 uppercase mb-1">Target Hub</p>
+                    <p className="text-xs font-bold text-white truncate">{selectedHospital.name}</p>
+                 </div>
+                 <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+                    <p className="text-[8px] font-black text-slate-500 uppercase mb-1">Dist.</p>
+                    <p className="text-xs font-bold text-emerald-500">{routeDistance}</p>
+                 </div>
+                 <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+                    <p className="text-[8px] font-black text-slate-500 uppercase mb-1">ETA Profile</p>
+                    <p className="text-xs font-bold text-white">{eta}</p>
+                 </div>
+              </div>
+           </div>
+        </div>
+      )}
+
+      {/* HOSPITAL FACILITY OVERLAY (Detailed) */}
+      {!navigationMode && selectedHospital && (
+        <div className="absolute bottom-10 left-10 z-[1500] w-[26rem] animate-in slide-in-from-left duration-500">
+           <div className="bg-slate-950 border-4 border-emerald-500/30 p-8 rounded-[3.5rem] shadow-2xl space-y-6 relative overflow-hidden">
+              <div className="h-44 -mx-8 -mt-8 bg-slate-900 relative">
+                 <img src={selectedHospital.image} className="w-full h-full object-cover opacity-80" />
+                 <div className="absolute inset-0 bg-gradient-to-t from-slate-950 to-transparent"></div>
+                 <button onClick={() => setSelectedHospital(null)} className="absolute top-6 right-6 w-10 h-10 bg-black/60 backdrop-blur-md rounded-full text-white flex items-center justify-center hover:bg-black transition-all">
+                    <i className="fa-solid fa-xmark"></i>
+                 </button>
+              </div>
+              <div className="space-y-1">
+                 <span className="bg-emerald-600/20 text-emerald-500 text-[9px] font-black px-3 py-1 rounded-full uppercase tracking-widest">Facility Profile Verified</span>
+                 <h3 className="text-2xl font-black text-white uppercase leading-none mt-3">{selectedHospital.name}</h3>
+              </div>
+              <div className="flex items-center gap-3 text-slate-400 bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+                 <i className="fa-solid fa-location-dot text-emerald-500"></i>
+                 <p className="text-[10px] font-bold uppercase tracking-widest leading-relaxed line-clamp-2">{selectedHospital.address}</p>
+              </div>
+              <div className="flex gap-4">
+                 <div className="flex-1 bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+                    <p className="text-[8px] font-black text-slate-500 uppercase mb-1">Road Distance</p>
+                    <p className="text-xs text-emerald-500 font-black">{routeDistance}</p>
+                 </div>
+                 <div className="flex-1 bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+                    <p className="text-[8px] font-black text-slate-500 uppercase mb-1">Dispatch Mode</p>
+                    <p className="text-xs text-white font-black">{transportMode?.toUpperCase()}</p>
+                 </div>
+              </div>
+              <button onClick={startMission} className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-black py-5 rounded-2xl text-[10px] uppercase tracking-[0.4em] shadow-xl flex items-center justify-center gap-3 transition-all">
+                 <i className="fa-solid fa-bolt"></i> Start Mission Navigation
+              </button>
+           </div>
+        </div>
+      )}
+
+      {/* DISCOVERY CAROUSEL */}
+      {!navigationMode && discoveredHospitals.length > 0 && !selectedHospital && (
+        <div className="absolute bottom-10 inset-x-10 z-[1400] flex gap-6 overflow-x-auto pb-6 px-4 no-scrollbar">
+           {discoveredHospitals.map((h) => (
+             <div 
+               key={h.id} 
+               onClick={() => handleHospitalSelect(h)}
+               className="shrink-0 w-80 bg-slate-950 border-4 border-slate-800 hover:border-emerald-500/50 transition-all cursor-pointer rounded-[3rem] overflow-hidden shadow-2xl"
+             >
+                <div className="h-36 bg-slate-900 relative">
+                   <img src={h.image} className="w-full h-full object-cover opacity-60" />
+                   <div className="absolute inset-0 bg-gradient-to-t from-slate-950 to-transparent"></div>
+                </div>
+                <div className="p-6 space-y-3">
+                   <h4 className="text-lg font-black text-white uppercase truncate">{h.name}</h4>
+                   <p className="text-[9px] text-slate-500 uppercase font-bold truncate">{h.address}</p>
+                   <p className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">Click to View Routing</p>
+                </div>
+             </div>
+           ))}
+        </div>
+      )}
+
+      {/* SCANNING RADAR */}
+      {isScanning && (
+        <div className="absolute inset-0 z-[2500] bg-black/70 backdrop-blur-2xl flex flex-col items-center justify-center">
+           <div className="relative">
+              <div className="w-64 h-64 border-4 border-emerald-500/10 rounded-full animate-ping"></div>
+              <div className="absolute inset-0 flex items-center justify-center">
+                 <div className="w-48 h-48 border-2 border-emerald-500/30 rounded-full animate-spin-slow">
+                    <div className="w-2 h-2 bg-emerald-500 rounded-full absolute -top-1 left-1/2 -translate-x-1/2 shadow-[0_0_15px_rgba(16,185,129,1)]"></div>
+                 </div>
+                 <i className="fa-solid fa-satellite-dish text-6xl text-emerald-500 animate-bounce absolute"></i>
+              </div>
+           </div>
+           <div className="mt-16 text-center">
+              <h3 className="text-3xl font-black text-white uppercase tracking-[0.6em] animate-pulse">Scanning 10KM Radius</h3>
+              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mt-4">Connecting to Neural Map Grid // Identifying Facilities</p>
+           </div>
+        </div>
+      )}
+
+      {/* DISCOVERY BACK BUTTON */}
+      {!navigationMode && discoveredHospitals.length > 0 && (
+        <button 
+          onClick={() => { setDiscoveredHospitals([]); setSelectedHospital(null); if (routeLineRef.current) routeLineRef.current.remove(); }}
+          className="absolute top-10 left-10 z-[1500] bg-slate-950/90 backdrop-blur-xl px-8 py-4 rounded-full border border-white/10 text-white font-black text-[10px] uppercase tracking-[0.4em] flex items-center gap-4 hover:bg-slate-900 transition-all shadow-2xl"
+        >
+          <i className="fa-solid fa-chevron-left text-emerald-500"></i> Exit Discovery View
+        </button>
+      )}
+
+      {/* STANDARD TOOLS */}
+      {!navigationMode && !isScanning && discoveredHospitals.length === 0 && (
+        <div className="absolute bottom-12 right-12 z-[1000] flex flex-col gap-6">
+          <button onClick={() => setShowSOSModal(true)} className="w-24 h-24 rounded-full bg-red-600 shadow-[0_0_60px_rgba(220,38,38,0.7)] flex flex-col items-center justify-center text-white border-4 border-white/20 hover:scale-110 transition-all">
+            <i className="fa-solid fa-truck-medical text-3xl mb-1"></i>
+            <span className="text-[10px] font-black uppercase tracking-widest">SOS</span>
+          </button>
+          <button onClick={() => setShowReportModal(true)} className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center text-white shadow-2xl hover:scale-110 transition-all border border-blue-500/30"><i className="fa-solid fa-plus text-2xl"></i></button>
+          <button onClick={syncLocation} className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center text-slate-400 shadow-2xl hover:scale-110 transition-all border border-slate-800"><i className="fa-solid fa-location-crosshairs text-2xl"></i></button>
+        </div>
+      )}
+
+      {/* SOS SELECTION MODAL */}
+      {showSOSModal && (
+        <div className="fixed inset-0 z-[3000] flex items-center justify-center p-8">
+          <div className="absolute inset-0 bg-red-950/70 backdrop-blur-2xl" onClick={() => setShowSOSModal(false)}></div>
+          <div className="relative bg-slate-950 border-4 border-red-600/50 p-16 rounded-[5rem] w-full max-w-2xl space-y-12 text-center shadow-2xl">
+            <div className="space-y-4">
+               <div className="w-24 h-24 bg-red-600 rounded-[2rem] mx-auto flex items-center justify-center shadow-2xl">
+                  <i className="fa-solid fa-tower-broadcast text-4xl text-white animate-pulse"></i>
                </div>
-            )}
+               <h3 className="text-5xl font-black text-white uppercase tracking-tighter leading-none">Emergency Hub Scan</h3>
+               <p className="text-slate-400 font-bold max-w-md mx-auto">Select transport mode for 10KM tactical discovery results.</p>
+            </div>
+            <div className="grid grid-cols-2 gap-8">
+               <button onClick={() => handleSOSScan('Car')} className="p-12 bg-slate-900 border-2 border-slate-800 hover:border-blue-600 rounded-[3rem] space-y-6 group transition-all">
+                  <div className="w-20 h-20 bg-slate-950 rounded-2xl mx-auto flex items-center justify-center group-hover:scale-110 transition-transform">
+                     <i className="fa-solid fa-car text-5xl text-slate-700 group-hover:text-blue-500"></i>
+                  </div>
+                  <p className="text-xs font-black uppercase text-slate-500 group-hover:text-white tracking-widest">Private Vehicle</p>
+               </button>
+               <button onClick={() => handleSOSScan('Ambulance')} className="p-12 bg-slate-900 border-2 border-slate-800 hover:border-emerald-600 rounded-[3rem] space-y-6 group transition-all">
+                  <div className="w-20 h-20 bg-slate-950 rounded-2xl mx-auto flex items-center justify-center group-hover:scale-110 transition-transform">
+                     <i className="fa-solid fa-truck-medical text-5xl text-slate-700 group-hover:text-emerald-500"></i>
+                  </div>
+                  <p className="text-xs font-black uppercase text-slate-500 group-hover:text-white tracking-widest">Ambulance SOS</p>
+               </button>
+            </div>
+            <button onClick={() => setShowSOSModal(false)} className="text-slate-600 font-black uppercase text-[10px] tracking-[0.5em] hover:text-white">Dismiss Request</button>
           </div>
         </div>
       )}
 
-      {/* SOS MODAL */}
-      {showSOSModal && (
-        <div className="fixed inset-0 z-[2000] flex items-center justify-center p-6">
-          <div className="absolute inset-0 bg-red-950/40 backdrop-blur-md" onClick={() => setShowSOSModal(false)}></div>
-          <div className="relative bg-slate-950 border-4 border-red-600/50 p-12 rounded-[4rem] w-full max-w-lg space-y-10 text-center shadow-2xl">
-            <h3 className="text-4xl font-black text-white uppercase tracking-tighter">Emergency SOS</h3>
-            <div className="grid grid-cols-2 gap-6">
-              <button onClick={() => handleSOS('Car')} className="p-8 bg-slate-900 border-2 border-slate-800 hover:border-blue-500 rounded-[2.5rem] space-y-4 group transition-all">
-                <i className="fa-solid fa-car text-3xl text-slate-600 group-hover:text-blue-500"></i>
-                <span className="block text-[10px] font-black uppercase text-slate-500 group-hover:text-white">Self-Drive</span>
-              </button>
-              <button onClick={() => handleSOS('Ambulance')} className="p-8 bg-slate-900 border-2 border-slate-800 hover:border-emerald-500 rounded-[2.5rem] space-y-4 group transition-all">
-                <i className="fa-solid fa-truck-medical text-3xl text-slate-600 group-hover:text-emerald-500"></i>
-                <span className="block text-[10px] font-black uppercase text-slate-500 group-hover:text-white">Ambulance</span>
-              </button>
+      {/* MANUAL REPORT */}
+      {showReportModal && (
+        <div className="fixed inset-0 z-[3000] flex items-center justify-center p-8">
+          <div className="absolute inset-0 bg-black/90 backdrop-blur-xl" onClick={() => setShowReportModal(false)}></div>
+          <div className="relative bg-slate-950 border-4 border-slate-900 p-16 rounded-[5rem] w-full max-w-xl space-y-12 shadow-2xl text-center">
+            <h3 className="text-5xl font-black text-white uppercase tracking-tighter">Tactical Entry</h3>
+            <div className="grid grid-cols-1 gap-6">
+               <button onClick={() => { setShowReportModal(false); reportFileInputRef.current?.click(); }} className="p-10 bg-slate-900 border-2 border-slate-800 hover:border-blue-600 rounded-[2.5rem] flex justify-between items-center text-white font-black uppercase tracking-widest group transition-all">
+                  Log Collision <i className="fa-solid fa-car-burst text-slate-700 group-hover:text-blue-500"></i>
+               </button>
+               <button onClick={() => { setShowReportModal(false); reportFileInputRef.current?.click(); }} className="p-10 bg-slate-900 border-2 border-slate-800 hover:border-amber-600 rounded-[2.5rem] flex justify-between items-center text-white font-black uppercase tracking-widest group transition-all">
+                  Log Traffic <i className="fa-solid fa-traffic-light text-slate-700 group-hover:text-amber-500"></i>
+               </button>
             </div>
-            <button onClick={() => setShowSOSModal(false)} className="text-slate-600 font-black uppercase text-[10px] tracking-widest">Cancel Request</button>
           </div>
         </div>
       )}
+
+      <input type="file" ref={reportFileInputRef} className="hidden" accept="image/*" />
 
       <style>{`
-        .custom-popup .leaflet-popup-content-wrapper { background: transparent !important; box-shadow: none !important; border: none !important; padding: 0 !important; }
-        .custom-popup .leaflet-popup-tip { display: none !important; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes road-pulse {
+          0% { stroke-dashoffset: 0; stroke-opacity: 0.9; }
+          100% { stroke-dashoffset: -30; stroke-opacity: 0.6; }
+        }
+        @keyframes spin-slow {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        .animate-spin-slow { animation: spin-slow 4s linear infinite; }
+        .leaflet-interactive { animation: road-pulse 1s infinite linear; }
       `}</style>
     </div>
   );

@@ -8,7 +8,6 @@ export type IncidentType =
   | 'Suspicious Behavior'
   | 'Traffic Congestion';
 
-// Added AuditCheck and VerificationAudit interfaces to fix import errors in geminiService.ts
 export interface AuditCheck {
   status: 'VALID' | 'FAILED' | 'SUSPICIOUS';
   details: string;
@@ -31,6 +30,7 @@ export interface IdentifiedSubject {
   faults?: string[]; 
   mugshotUrl?: string;
   mugshotBase64?: string; 
+  locationInImage?: string; // Spatial location for group detection
 }
 
 export interface Incident {

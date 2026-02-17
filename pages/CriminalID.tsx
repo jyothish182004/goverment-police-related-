@@ -23,6 +23,8 @@ const CriminalID: React.FC<CriminalIDProps> = ({ onNewIncident, incidents, isSim
   const [error, setError] = useState<string | null>(null);
   const [detections, setDetections] = useState<DetectionResult[]>([]);
   const [currentMediaUrl, setCurrentMediaUrl] = useState<string | null>(null);
+  const [showAlert, setShowAlert] = useState(false);
+  const [alertTarget, setAlertTarget] = useState<IdentifiedSubject | null>(null);
   
   const suspectInputRef = useRef<HTMLInputElement>(null);
   const registryInputRef = useRef<HTMLInputElement>(null);
@@ -40,7 +42,7 @@ const CriminalID: React.FC<CriminalIDProps> = ({ onNewIncident, incidents, isSim
         id: `TRG-${Math.floor(1000 + Math.random() * 9000)}`,
         status: 'Wanted',
         riskLevel: 'High',
-        bio: "Registered tactical profile. Monitored for safety threats.",
+        bio: "Monitored Profile. High-priority tracking active.",
         matchConfidence: 1,
         mugshotUrl: url,
         mugshotBase64: base64
@@ -56,6 +58,7 @@ const CriminalID: React.FC<CriminalIDProps> = ({ onNewIncident, incidents, isSim
 
     setError(null);
     setDetections([]);
+    setShowAlert(false);
     const url = URL.createObjectURL(file);
     setCurrentMediaUrl(url);
     setIsProcessing(true);
@@ -65,22 +68,20 @@ const CriminalID: React.FC<CriminalIDProps> = ({ onNewIncident, incidents, isSim
       const reader = new FileReader();
       reader.onload = async () => {
         const base64 = (reader.result as string).split(',')[1];
-        setStatus('PERFORMING VISUAL CROSS-MATCH...');
+        setStatus('SCANNING GROUP NEURAL VECTORS...');
         try {
-          // Now passing the full registry with images to Gemini
           const results = await analyzeVisualMedia(base64, file.type, isSimulated, registry);
           
           if (results && results.length > 0) {
             const processedDetections: DetectionResult[] = results
               .filter(r => r.identifiedSubject)
               .map(r => {
-                const isTarget = r.type === "Target Match";
+                const isTarget = r.type === "Target Match" || r.identifiedSubject?.matchConfidence > 0.7;
                 const confidence = r.identifiedSubject?.matchConfidence || r.confidence || 0;
                 
-                // Smart Logic: Auto-Confirm high confidence matches
-                const autoConfirm = isTarget && confidence > 0.85;
-                
-                if (autoConfirm) {
+                if (isTarget && confidence > 0.8) {
+                  setAlertTarget(r.identifiedSubject);
+                  setShowAlert(true);
                   archiveAutoMatch(r.identifiedSubject, url);
                 }
 
@@ -88,24 +89,24 @@ const CriminalID: React.FC<CriminalIDProps> = ({ onNewIncident, incidents, isSim
                   type: r.type,
                   identifiedSubject: r.identifiedSubject,
                   confidence: confidence,
-                  autoConfirmed: autoConfirm
+                  autoConfirmed: isTarget && confidence > 0.8
                 };
               });
 
             setDetections(processedDetections);
-            setStatus(`SCAN COMPLETE: ${processedDetections.length} IDENTITIES RESOLVED`);
+            setStatus(`SCAN COMPLETE: ${processedDetections.length} TARGETS LOCKED`);
           } else {
-            setError('SCENE CLEAR // NO SUBJECTS DETECTED');
+            setError('SCENE CLEAR // NO REGISTERED TARGETS DETECTED');
           }
         } catch (error: any) {
-          setError('NEURAL UPLINK FAILURE: CHECK API STATUS');
+          setError('NEURAL UPLINK FAILURE');
         } finally {
           setIsProcessing(false);
         }
       };
       reader.readAsDataURL(file);
     } catch (err) {
-      setError('MEDIA INPUT ERROR');
+      setError('INPUT ERROR');
       setIsProcessing(false);
     }
   };
@@ -113,229 +114,188 @@ const CriminalID: React.FC<CriminalIDProps> = ({ onNewIncident, incidents, isSim
   const archiveAutoMatch = (subject: IdentifiedSubject, url: string) => {
     const now = new Date();
     const incident: Incident = {
-      id: `AUTO-${Math.floor(Math.random() * 90000)}`,
+      id: `GROUP-ID-${Math.floor(Math.random() * 90000)}`,
       type: 'Suspicious Behavior',
-      timestamp: '00:01',
-      savedAt: `${now.toLocaleDateString()}, ${now.toLocaleTimeString()}`,
-      location: 'SECTOR ALPHA // BIOMETRIC LOCK',
+      timestamp: 'LIVE',
+      savedAt: now.toLocaleString(),
+      location: `SECTOR ALPHA // ${subject.locationInImage || 'UNSPECIFIED QUADRANT'}`,
       confidence: subject.matchConfidence || 0.95,
       videoRef: 'High-Res Scan',
       snapshotUrl: url,
-      description: `Target ${subject.name} (ID: ${subject.id}) matched against registry. System auto-confirmed biometric signature via visual comparison.`,
-      detectedObjects: ['Human', 'Target'],
+      description: `CRITICAL MATCH: Target ${subject.name} identified within group at ${subject.locationInImage || 'Active Sector'}. Biometric signature confirmed.`,
+      detectedObjects: ['Human', 'Target Locked'],
       identifiedSubject: subject
     };
     onNewIncident(incident);
   };
 
-  const confirmManualMatch = (det: DetectionResult) => {
-    const now = new Date();
-    const incident: Incident = {
-      id: `BIOLOCK-${Math.floor(Math.random() * 90000)}`,
-      type: 'Suspicious Behavior',
-      timestamp: '00:01',
-      savedAt: `${now.toLocaleDateString()}, ${now.toLocaleTimeString()}`,
-      location: 'SECTOR ALPHA // OPERATOR CONFIRMED',
-      confidence: det.confidence,
-      videoRef: 'Manual Cross-Match',
-      snapshotUrl: currentMediaUrl || '',
-      description: `Target ${det.identifiedSubject.name} manually verified by operator after Uncertainty Audit.`,
-      detectedObjects: ['Human', 'Target Match'],
-      identifiedSubject: det.identifiedSubject
-    };
-    onNewIncident(incident);
-    setDetections(prev => prev.map(d => d.identifiedSubject.id === det.identifiedSubject.id ? { ...d, autoConfirmed: true } : d));
-  };
-
   return (
     <div className="max-w-[1400px] mx-auto space-y-12 animate-in fade-in duration-1000">
       
-      {/* HEADER SECTION */}
+      {/* HEADER */}
       <div className="flex flex-col md:flex-row justify-between items-end border-b-4 border-slate-900 pb-10 gap-8">
         <div className="space-y-2">
            <div className="flex items-center gap-3">
-              <span className="w-2.5 h-2.5 bg-rose-600 rounded-full animate-pulse shadow-[0_0_10px_rgba(225,29,72,0.8)]"></span>
-              <span className="text-[10px] font-black text-rose-500 uppercase tracking-[0.4em]">Biometric ID Terminal</span>
+              <span className="w-2.5 h-2.5 bg-rose-600 rounded-full animate-pulse shadow-[0_0_15px_rgba(225,29,72,0.8)]"></span>
+              <span className="text-[10px] font-black text-rose-500 uppercase tracking-[0.4em]">Biometric Hub v2.1</span>
            </div>
-           <h1 className="text-7xl font-black text-white uppercase tracking-tighter leading-none">Search <span className="text-rose-600">Hub</span></h1>
+           <h1 className="text-7xl font-black text-white uppercase tracking-tighter leading-none">Group <span className="text-rose-600">Scanner</span></h1>
         </div>
-        <div className="flex items-center gap-10 bg-slate-900/40 p-6 rounded-[2rem] border border-slate-800/50 shadow-2xl">
-           <div className="text-center px-10 border-r border-slate-800">
-              <span className="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Target Registry</span>
+        <div className="bg-slate-900/40 p-6 rounded-[2rem] border border-slate-800/50 flex items-center gap-8">
+           <div className="text-center px-6 border-r border-slate-800">
+              <span className="block text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Registry Targets</span>
               <span className="text-4xl font-black text-rose-500">{registry.length}</span>
            </div>
-           <div className="text-center px-10">
-              <span className="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Confirmed Matches</span>
-              <span className="text-4xl font-black text-emerald-500">{incidents.filter(i => i.id.startsWith('AUTO') || i.id.startsWith('BIO')).length}</span>
-           </div>
+           <button onClick={() => registryInputRef.current?.click()} className="bg-rose-600 hover:bg-rose-500 text-white px-8 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-xl">
+              Add Target +
+           </button>
         </div>
       </div>
 
-      <div className="flex flex-col gap-10">
-         <div className="p-10 lg:p-14 bg-slate-950 border-4 border-slate-900 rounded-[4rem] shadow-2xl space-y-12 min-h-[850px] flex flex-col relative overflow-hidden">
-            <div className="flex justify-between items-center shrink-0">
-               <div className="space-y-1">
-                  <h2 className="text-4xl font-black text-white uppercase tracking-tight flex items-center gap-4">
-                     <i className="fa-solid fa-users-viewfinder text-rose-600"></i> Neural <span className="text-rose-600">Comparison</span>
-                  </h2>
-                  <p className="text-slate-500 text-[11px] font-black uppercase tracking-widest">Multi-vector visual biometric alignment</p>
-               </div>
-               <div className="flex items-center gap-4">
-                 <input type="file" ref={registryInputRef} className="hidden" accept="image/*" onChange={handleAddRegistryEntry} />
-                 <button onClick={() => registryInputRef.current?.click()} className="bg-slate-900 hover:bg-white hover:text-black text-white px-8 py-4 rounded-3xl text-[10px] font-black uppercase tracking-widest transition-all border border-slate-800 flex items-center gap-3 active:scale-95 shadow-lg">
-                    <i className="fa-solid fa-user-plus text-xs"></i> Add Registry Target
-                 </button>
-               </div>
-            </div>
-
-            {/* Registry Visual Thumbnails */}
-            {registry.length > 0 && (
-              <div className="flex gap-4 overflow-x-auto pb-6 custom-scrollbar border-b border-slate-900">
-                 {registry.map((target, idx) => (
-                   <div key={idx} className="group relative w-20 h-20 rounded-2xl overflow-hidden border-2 border-slate-800 bg-slate-900 shrink-0 hover:border-rose-500 transition-all cursor-help">
-                      <img src={target.mugshotUrl} className="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all" />
-                      <div className="absolute inset-0 bg-rose-600/20 opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                      <div className="absolute bottom-1 right-1">
-                         <div className="w-2 h-2 bg-rose-500 rounded-full shadow-[0_0_5px_rgba(225,29,72,1)]"></div>
-                      </div>
-                   </div>
-                 ))}
-              </div>
-            )}
-
-            <div className="flex-1 flex flex-col pt-4">
-               <input type="file" ref={suspectInputRef} className="hidden" accept="image/*" onChange={handleSuspectCheck} />
-               
-               {!currentMediaUrl && !isProcessing && (
-                 <div onClick={() => suspectInputRef.current?.click()} className="flex-1 bg-slate-900/20 border-4 border-dashed border-slate-900 rounded-[4rem] flex flex-col items-center justify-center cursor-pointer group hover:border-rose-600/40 transition-all">
-                    <div className="w-28 h-28 bg-slate-950 border border-slate-800 rounded-[3rem] flex items-center justify-center mb-8 group-hover:scale-110 transition-transform group-hover:border-rose-600 shadow-inner">
-                       <i className="fa-solid fa-scan text-6xl text-slate-700 group-hover:text-rose-600"></i>
-                    </div>
-                    <h3 className="text-4xl font-black text-white uppercase tracking-[0.2em]">Upload Scene Feed</h3>
-                    <p className="text-slate-600 text-[11px] uppercase font-black tracking-widest mt-4">Analyzing images against registry targets in real-time</p>
-                 </div>
-               )}
-
-               {isProcessing && (
-                 <div className="flex-1 flex flex-col items-center justify-center text-center">
-                    <div className="relative w-32 h-32 mb-10">
-                       <div className="absolute inset-0 border-8 border-slate-900 rounded-full"></div>
-                       <div className="absolute inset-0 border-8 border-t-rose-600 rounded-full animate-spin"></div>
-                       <i className="fa-solid fa-dna absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-4xl text-rose-500 animate-pulse"></i>
-                    </div>
-                    <p className="text-rose-500 font-black text-xl uppercase tracking-[0.4em] animate-pulse">{status}</p>
-                 </div>
-               )}
-
-               {currentMediaUrl && !isProcessing && (
-                 <div className="flex-1 flex flex-col animate-in slide-in-from-bottom-8">
-                    <div className="flex justify-between items-center mb-10">
-                       <h4 className="text-rose-500 font-black text-[12px] uppercase tracking-[0.5em] flex items-center gap-4">
-                          <span className="w-2.5 h-2.5 bg-rose-500 rounded-full animate-ping shadow-[0_0_10px_rgba(225,29,72,1)]"></span> 
-                          Neural Analysis Active
-                       </h4>
-                       <button onClick={() => { setCurrentMediaUrl(null); setDetections([]); }} className="text-slate-500 hover:text-white uppercase font-black text-[10px] tracking-widest px-8 py-3 border border-slate-800 rounded-full hover:bg-rose-600 hover:border-rose-600 transition-all">New Scan</button>
-                    </div>
-
-                    <div className="flex flex-col lg:flex-row gap-16">
-                       <div className="w-full lg:w-3/5 aspect-video lg:aspect-square bg-black rounded-[4rem] overflow-hidden border-4 border-slate-900 relative shadow-2xl group">
-                          <img src={currentMediaUrl} className="w-full h-full object-contain" />
-                          <div className="absolute inset-0">
-                             <div className="w-full h-[2px] bg-rose-600 animate-[scan_4s_infinite] absolute shadow-[0_0_20px_rgba(225,29,72,1)]"></div>
-                          </div>
-                          {/* Visual Overlay Indicators */}
-                          <div className="absolute top-1/2 left-0 right-0 h-px bg-white/5"></div>
-                          <div className="absolute top-0 bottom-0 left-1/2 w-px bg-white/5"></div>
-                       </div>
-                       
-                       <div className="flex-1 space-y-8 overflow-y-auto max-h-[600px] pr-4 custom-scrollbar">
-                          {detections.length > 0 ? (
-                             detections.map((det, idx) => {
-                               const isTarget = det.type === "Target Match";
-                               const regTarget = isTarget ? registry.find(t => t.id === det.identifiedSubject?.id) : null;
-                               
-                               return (
-                                 <div key={idx} className={`bg-slate-900/60 border-2 rounded-[3.5rem] p-10 space-y-8 animate-in slide-in-from-right duration-300 ${isTarget ? 'border-rose-600 shadow-[0_0_40px_rgba(225,29,72,0.15)]' : 'border-blue-600/50'}`}>
-                                    <div className="flex items-center gap-8">
-                                       <div className={`w-24 h-24 rounded-3xl overflow-hidden border-4 shrink-0 shadow-2xl ${isTarget ? 'border-rose-600 animate-pulse' : 'border-blue-600'}`}>
-                                          <img src={regTarget?.mugshotUrl || `https://picsum.photos/seed/${det.identifiedSubject?.id}/200`} className={`w-full h-full object-cover ${!isTarget && 'grayscale'}`} />
-                                       </div>
-                                       <div className="flex-1 min-w-0">
-                                          <div className="flex items-center gap-3 mb-1">
-                                             <h4 className="text-3xl font-black text-white uppercase tracking-tighter truncate leading-none">{det.identifiedSubject?.name || "Subject Detected"}</h4>
-                                             {isTarget && <i className="fa-solid fa-circle-check text-rose-500"></i>}
-                                          </div>
-                                          <p className={`text-[12px] font-black uppercase tracking-widest ${isTarget ? 'text-rose-500' : 'text-blue-500'}`}>
-                                             {det.identifiedSubject?.id || "N/A"} // {isTarget ? 'REGISTRY MATCH' : 'NON-TARGET'}
-                                          </p>
-                                       </div>
-                                    </div>
-                                    
-                                    <div className={`p-6 rounded-[2rem] ${isTarget ? 'bg-rose-600/10 border border-rose-600/20' : 'bg-blue-600/10 border border-blue-600/20'}`}>
-                                       <div className="flex justify-between items-center mb-3">
-                                          <p className="text-[10px] font-black text-white uppercase tracking-widest">Biometric Precision</p>
-                                          <span className={`text-2xl font-black ${isTarget ? 'text-rose-500' : 'text-blue-500'}`}>{Math.round(det.confidence * 100)}%</span>
-                                       </div>
-                                       <div className="w-full h-2 bg-black/40 rounded-full overflow-hidden">
-                                          <div className={`h-full transition-all duration-[1500ms] ${isTarget ? 'bg-rose-600' : 'bg-blue-600'}`} style={{ width: `${det.confidence * 100}%` }}></div>
-                                       </div>
-                                    </div>
-
-                                    {isTarget && !det.autoConfirmed && (
-                                       <div className="flex gap-4">
-                                          <button onClick={() => confirmManualMatch(det)} className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-black py-5 rounded-2xl text-[11px] uppercase tracking-widest transition-all shadow-xl active:scale-95">Lock Target</button>
-                                          <button onClick={() => setDetections(prev => prev.filter(d => d.identifiedSubject?.id !== det.identifiedSubject?.id))} className="flex-1 bg-slate-800 hover:bg-rose-600 text-white font-black py-5 rounded-2xl text-[11px] uppercase tracking-widest transition-all active:scale-95">Dismiss</button>
-                                       </div>
-                                    )}
-
-                                    {isTarget && det.autoConfirmed && (
-                                       <div className="bg-emerald-600/20 border border-emerald-600/40 p-8 rounded-[2rem] flex items-center justify-center gap-6 shadow-inner">
-                                          <i className="fa-solid fa-shield-check text-emerald-500 text-3xl"></i>
-                                          <span className="text-[11px] font-black text-emerald-500 uppercase tracking-widest">Identity Confirmed & Dispatched to Archive</span>
-                                       </div>
-                                    )}
-                                    
-                                    {!isTarget && (
-                                      <div className="text-center p-4">
-                                         <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] italic">No Hostile Signature Detected</p>
-                                      </div>
-                                    )}
-                                 </div>
-                               );
-                             })
-                          ) : (
-                             <div className="flex-1 flex flex-col items-center justify-center text-center p-20 bg-slate-900/20 border-4 border-dashed border-slate-900 rounded-[4rem]">
-                                <i className="fa-solid fa-face-viewfinder text-8xl text-slate-800 mb-10 opacity-20"></i>
-                                <h4 className="text-slate-600 font-black uppercase text-2xl tracking-tighter">Biometric Neutrality</h4>
-                                <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest mt-4 leading-relaxed max-w-sm mx-auto">Upload a feed to scan for people. If registry targets are detected, the neural scanner will perform a visual cross-match.</p>
-                             </div>
-                          )}
-                       </div>
+      <div className="flex flex-col lg:flex-row gap-10">
+         {/* REGISTRY SIDEBAR */}
+         <div className="lg:w-80 space-y-6">
+            <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-3">
+               <i className="fa-solid fa-folder-open"></i> Live Registry
+            </h3>
+            <div className="grid grid-cols-2 lg:grid-cols-1 gap-4">
+               {registry.length > 0 ? registry.map((t, i) => (
+                 <div key={i} className="bg-slate-900 border border-slate-800 p-4 rounded-3xl flex items-center gap-4 group hover:border-rose-500/50 transition-all">
+                    <img src={t.mugshotUrl} className="w-12 h-12 rounded-xl object-cover grayscale group-hover:grayscale-0 transition-all" />
+                    <div className="min-w-0">
+                       <p className="text-[10px] font-black text-white uppercase truncate">{t.name}</p>
+                       <p className="text-[8px] font-bold text-rose-500 uppercase">{t.id}</p>
                     </div>
                  </div>
+               )) : (
+                 <p className="text-[10px] font-bold text-slate-600 uppercase italic">Awaiting profile uploads...</p>
                )}
             </div>
          </div>
+
+         <div className="flex-1 bg-slate-950 border-4 border-slate-900 rounded-[4rem] p-12 min-h-[700px] flex flex-col relative overflow-hidden shadow-2xl">
+            <input type="file" ref={registryInputRef} className="hidden" accept="image/*" onChange={handleAddRegistryEntry} />
+            <input type="file" ref={suspectInputRef} className="hidden" accept="image/*" onChange={handleSuspectCheck} />
+
+            {!currentMediaUrl && !isProcessing && (
+              <div onClick={() => suspectInputRef.current?.click()} className="flex-1 border-4 border-dashed border-slate-900 rounded-[3rem] flex flex-col items-center justify-center cursor-pointer group hover:border-rose-600/30 transition-all">
+                 <div className="w-24 h-24 bg-slate-900 rounded-[2rem] flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
+                    <i className="fa-solid fa-users-viewfinder text-5xl text-slate-700 group-hover:text-rose-600"></i>
+                 </div>
+                 <h2 className="text-3xl font-black text-white uppercase tracking-tighter">Scan Group Feed</h2>
+                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-2">Identify targets within group environments</p>
+              </div>
+            )}
+
+            {isProcessing && (
+              <div className="flex-1 flex flex-col items-center justify-center space-y-8">
+                 <div className="w-20 h-20 border-4 border-slate-900 border-t-rose-600 rounded-full animate-spin"></div>
+                 <p className="text-rose-500 font-black text-xl uppercase tracking-[0.4em] animate-pulse">{status}</p>
+              </div>
+            )}
+
+            {currentMediaUrl && !isProcessing && (
+              <div className="flex-1 flex flex-col lg:flex-row gap-12 animate-in slide-in-from-bottom-6">
+                 <div className="lg:w-2/3 bg-black rounded-[3rem] overflow-hidden border-4 border-slate-900 relative">
+                    <img src={currentMediaUrl} className="w-full h-full object-contain" />
+                    {/* Visual Lock Overlay */}
+                    <div className="absolute inset-0 border-[20px] border-rose-600/5 pointer-events-none"></div>
+                    <div className="absolute top-0 left-0 w-16 h-16 border-t-4 border-l-4 border-rose-600/40"></div>
+                    <div className="absolute bottom-0 right-0 w-16 h-16 border-b-4 border-r-4 border-rose-600/40"></div>
+                 </div>
+
+                 <div className="flex-1 space-y-6">
+                    <div className="flex justify-between items-center">
+                       <h4 className="text-[10px] font-black text-rose-500 uppercase tracking-widest">Neural Lock Active</h4>
+                       <button onClick={() => { setCurrentMediaUrl(null); setDetections([]); setShowAlert(false); }} className="text-slate-500 hover:text-white transition-colors">
+                          <i className="fa-solid fa-xmark"></i>
+                       </button>
+                    </div>
+
+                    <div className="space-y-4">
+                       {detections.map((det, idx) => (
+                         <div key={idx} className={`p-8 rounded-[2.5rem] border-2 transition-all ${det.autoConfirmed ? 'bg-rose-600/10 border-rose-600 shadow-[0_0_30px_rgba(225,29,72,0.1)]' : 'bg-slate-900 border-slate-800'}`}>
+                            <div className="flex items-center gap-6">
+                               <div className={`w-16 h-16 rounded-2xl overflow-hidden border-2 shrink-0 ${det.autoConfirmed ? 'border-rose-600 animate-pulse' : 'border-slate-700'}`}>
+                                  <img src={`https://picsum.photos/seed/${det.identifiedSubject.id}/200`} className="w-full h-full object-cover" />
+                               </div>
+                               <div>
+                                  <h5 className="text-xl font-black text-white uppercase leading-none">{det.identifiedSubject.name}</h5>
+                                  <p className="text-rose-500 font-bold text-[9px] uppercase mt-1 tracking-widest">Confidence: {Math.round(det.confidence * 100)}%</p>
+                               </div>
+                            </div>
+                            
+                            <div className="mt-6 pt-6 border-t border-white/5 space-y-3">
+                               <div className="flex justify-between items-center text-[10px] font-black uppercase">
+                                  <span className="text-slate-500 tracking-widest">Group Location</span>
+                                  <span className="text-white bg-rose-600/20 px-3 py-1 rounded-lg">{det.identifiedSubject.locationInImage || 'Searching...'}</span>
+                               </div>
+                               <p className="text-xs text-slate-400 italic">"Subject identified within crowd. Neural signature matches registry file."</p>
+                            </div>
+                         </div>
+                       ))}
+                       
+                       {detections.length === 0 && (
+                         <div className="p-12 text-center opacity-20 border-2 border-dashed border-slate-800 rounded-[2.5rem]">
+                            <i className="fa-solid fa-face-viewfinder text-6xl mb-4"></i>
+                            <p className="font-black uppercase text-xs">No Matches</p>
+                         </div>
+                       )}
+                    </div>
+                 </div>
+              </div>
+            )}
+         </div>
       </div>
+
+      {/* EMERGENCY ALERT MODAL */}
+      {showAlert && alertTarget && (
+        <div className="fixed inset-0 z-[5000] flex items-center justify-center p-8 overflow-hidden">
+           <div className="absolute inset-0 bg-red-950/80 backdrop-blur-xl animate-pulse"></div>
+           <div className="relative w-full max-w-4xl bg-black border-8 border-rose-600 rounded-[5rem] p-16 space-y-10 text-center shadow-[0_0_150px_rgba(225,29,72,0.6)] animate-in zoom-in-95 duration-300">
+              
+              <div className="flex justify-center gap-10">
+                 <div className="w-32 h-32 bg-slate-900 rounded-[3rem] border-4 border-slate-800 overflow-hidden">
+                    <img src={registry.find(t => t.id === alertTarget.id)?.mugshotUrl} className="w-full h-full object-cover grayscale" />
+                 </div>
+                 <div className="w-16 h-16 bg-rose-600 rounded-full flex items-center justify-center animate-ping self-center">
+                    <i className="fa-solid fa-triangle-exclamation text-white text-3xl"></i>
+                 </div>
+                 <div className="w-32 h-32 bg-slate-900 rounded-[3rem] border-4 border-rose-600 overflow-hidden">
+                    <img src={currentMediaUrl || ''} className="w-full h-full object-cover" />
+                 </div>
+              </div>
+
+              <div className="space-y-4">
+                 <h2 className="text-7xl font-black text-white uppercase tracking-tighter leading-none">Target <span className="text-rose-600">Matched</span></h2>
+                 <p className="text-2xl font-black text-rose-500 uppercase tracking-widest">{alertTarget.name} // {alertTarget.id}</p>
+                 <div className="inline-block bg-rose-600/20 px-8 py-3 rounded-2xl border border-rose-600/40">
+                    <p className="text-xs font-black text-white uppercase tracking-widest">Locked Sector: {alertTarget.locationInImage}</p>
+                 </div>
+              </div>
+
+              <div className="flex gap-6">
+                 <button onClick={() => setShowAlert(false)} className="flex-1 bg-white text-black font-black py-8 rounded-[2.5rem] text-xl uppercase tracking-widest hover:scale-105 transition-transform shadow-2xl">
+                    Deploy Authorities
+                 </button>
+                 <button onClick={() => setShowAlert(false)} className="flex-1 bg-slate-900 border-4 border-slate-800 text-slate-500 font-black py-8 rounded-[2.5rem] text-xl uppercase tracking-widest hover:text-white transition-all">
+                    Dismiss Alert
+                 </button>
+              </div>
+
+              <div className="absolute top-10 left-10 text-rose-600 font-mono text-[10px] font-bold uppercase space-y-1 text-left opacity-40">
+                 <p>SYS_STATUS: CRITICAL_MATCH</p>
+                 <p>SECTOR_OVERWATCH: ACTIVE</p>
+                 <p>BIOMETRIC_PRECISION: 0.9882</p>
+              </div>
+           </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes scan {
-          0% { top: 0; }
-          50% { top: 100%; }
-          100% { top: 0; }
-        }
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 6px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #1e293b;
-          border-radius: 20px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #334155;
+          0% { transform: translateY(0); }
+          100% { transform: translateY(600px); }
         }
       `}</style>
     </div>
