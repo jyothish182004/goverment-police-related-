@@ -8,7 +8,6 @@ const cleanJsonResponse = (text: string) => {
 
 export const findNearbyHospitals = async (lat: number, lng: number): Promise<any[]> => {
   if (!process.env.API_KEY) {
-    // Simulated fallback data for local testing
     return [
       {
         id: 'h1',
@@ -67,7 +66,6 @@ export const findNearbyHospitals = async (lat: number, lng: number): Promise<any
             lat: lat + offsetLat, 
             lng: lng + offsetLng 
           },
-          // Rotating images for variety
           image: [
             "https://images.unsplash.com/photo-1519494026892-80bbd2d6fd0d?auto=format&fit=crop&w=800&q=80",
             "https://images.unsplash.com/photo-1586773860418-d37222d8fce3?auto=format&fit=crop&w=800&q=80",
@@ -133,18 +131,68 @@ export const analyzeVisualMedia = async (
   fileName: string = ""
 ): Promise<any[]> => {
   if (isSimulated || !process.env.API_KEY) {
-    await new Promise(r => setTimeout(r, 600));
-    return [{ type: "Target Match", confidence: 0.99, description: "Simulated Match", identifiedSubject: knownTargets[0] }];
+    await new Promise(r => setTimeout(r, 2200));
+
+    // Improved Simulation: Detect multiple targets if in group
+    if (knownTargets.length > 0) {
+      return knownTargets.slice(0, 2).map((target, idx) => ({
+        type: "Target Match",
+        confidence: 0.98 - (idx * 0.05),
+        description: `CRITICAL BIOMETRIC LOCK: ${target.name} facial geometry verified in crowd. Spatial markers match registry profile ${target.id}.`,
+        location: "Sector 7 // North Plaza Junction",
+        detectedObjects: ["Person", "Target Confirmed", "Group"],
+        matchedTargetId: target.id,
+        locationInImage: idx === 0 ? "Third person from left" : "Center background"
+      }));
+    }
+
+    return [{ 
+      type: "Vehicle Collision", 
+      confidence: 0.99, 
+      description: "SIMULATED THREAT: Multi-vehicle high-impact collision detected at intersection.", 
+      location: "Grid Sector 7-G",
+      detectedObjects: ["Vehicle", "Debris", "Smoke"]
+    }];
   }
+
+  // USE GEMINI 3 PRO FOR COMPLEX SEARCH HUB TASKS
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   try {
+    const prompt = knownTargets.length > 0 
+      ? `ACT AS: Advanced Facial Recognition Subsystem.
+         SCENE CONTEXT: This is a crowd/group scan. 
+         REGISTRY DATABASE: ${JSON.stringify(knownTargets.map(t => ({id: t.id, name: t.name})))}.
+         
+         OBJECTIVE: 
+         1. Identify EVERY human face in the image, even if small or in a group.
+         2. Perform a multi-point biometric comparison of each face against the REGISTRY DATABASE.
+         3. You must find matches even if the person is partially obscured or in a busy background.
+         
+         OUTPUT FORMAT: JSON array of objects.
+         Each match object:
+         {
+           "type": "Target Match",
+           "confidence": number (0-1),
+           "description": "Explain WHY this face matches the registry profile.",
+           "location": "Urban sector name",
+           "matchedTargetId": "The EXACT 'id' from the registry that matches",
+           "locationInImage": "Detailed position (e.g. 'standing near the blue pillar', 'person in the red jacket')",
+           "detectedObjects": ["Person", "Group", "Specific features seen"]
+         }
+         Return [] if no registry targets are identified.`
+      : "Analyze this media for security threats. Return JSON array with fields: type, confidence, description, location, detectedObjects.";
+
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: { parts: [{ inlineData: { data: mediaBase64, mimeType: mimeType } }, { text: "Analyze media for security threats. Return JSON array." }] },
-      config: { responseMimeType: "application/json" }
+      model: "gemini-3-pro-preview", // UPGRADED FOR CROWD REASONING
+      contents: { parts: [{ inlineData: { data: mediaBase64, mimeType: mimeType } }, { text: prompt }] },
+      config: { 
+        responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 4000 } // ADDED BUDGET FOR SEARCH TASKS
+      }
     });
     return JSON.parse(cleanJsonResponse(response.text || "[]"));
   } catch (err) {
+    console.error("AI Analysis Error:", err);
     return [];
   }
 };
